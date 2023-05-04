@@ -1,7 +1,7 @@
 use std::{path::PathBuf, fmt};
 use quote::ToTokens;
 use structopt::StructOpt;
-use syn::{File, visit::Visit, ExprLit, Lit, ItemFn, ExprMacro};
+use syn::{File, visit::Visit, ExprLit, Lit, ItemFn, ExprMacro, ItemStruct, ItemEnum};
 use walkdir::{WalkDir, DirEntry};
 
 
@@ -14,7 +14,8 @@ pub struct Cli {
 }
 
 pub struct CodeVisitor {
-    pub functions: Vec<FunctionInfo>,
+    functions: Vec<FunctionInfo>,
+    types: Vec<TypeInfo>,
 }
 
 impl<'ast> Visit<'ast> for CodeVisitor {
@@ -30,16 +31,41 @@ impl<'ast> Visit<'ast> for CodeVisitor {
     //         _ => {}
     //     }
     // }
-    fn visit_expr_macro(&mut self, expr_macro: &'ast ExprMacro) {
-        let macro_path = &expr_macro.mac.path;
-        if macro_path.is_ident("json") {
-            let macro_tokens = expr_macro.mac.tokens.to_string();
-            // if let Some(json_content) = extract_json_from_macro_tokens(&macro_tokens) {
-                // if is_valid_json(&json_content) {
-                    println!("Found json! macro: {}", macro_tokens);
-                // }
-            }
-        // }
+    // fn visit_expr_macro(&mut self, expr_macro: &'ast ExprMacro) {
+    //     let macro_path = &expr_macro.mac.path;
+    //     if macro_path.is_ident("json") {
+    //         let macro_tokens = expr_macro.mac.tokens.to_string();
+    //         // if let Some(json_content) = extract_json_from_macro_tokens(&macro_tokens) {
+    //             // if is_valid_json(&json_content) {
+    //                 println!("Found json! macro: {}", macro_tokens);
+    //             // }
+    //         }
+    //     // }
+    // }
+    fn visit_item_struct(&mut self, item_struct: &'ast ItemStruct) {
+        let name = item_struct.ident.to_string();
+        let visibility = item_struct.vis.to_token_stream().to_string();
+
+        let type_info = TypeInfo {
+            name,
+            kind: "struct".to_string(),
+            visibility: if visibility.is_empty() { None } else { Some(visibility) },
+        };
+
+        self.types.push(type_info);
+    }
+
+    fn visit_item_enum(&mut self, item_enum: &'ast ItemEnum) {
+        let name = item_enum.ident.to_string();
+        let visibility = item_enum.vis.to_token_stream().to_string();
+
+        let type_info = TypeInfo {
+            name,
+            kind: "enum".to_string(),
+            visibility: if visibility.is_empty() { None } else { Some(visibility) },
+        };
+
+        self.types.push(type_info);
     }
     // Implement visit_item_fn to handle function items in the AST
     fn visit_item_fn(&mut self, item_fn: &'ast ItemFn) {
@@ -69,11 +95,37 @@ impl<'ast> Visit<'ast> for CodeVisitor {
     }
 }
 
+impl CodeVisitor {
+    pub fn create_report(entry: DirEntry, ast: &File) {
+        let mut visitor = CodeVisitor{
+            functions: Vec::new(),
+            types: Vec::new()
+        };
+        visitor.visit_file(&ast);
+        visitor.report(entry);
+    }
+    pub fn report(self, entry: DirEntry) {
+        println!("File: {}", entry.path().display());
+        if !self.functions.is_empty() {
+            for func_info in self.functions {
+                println!("{}\n", func_info);
+            }
+        }
+    
+        if !self.types.is_empty() {
+            for type_info in self.types {
+                println!("{}\n", type_info);
+            }
+        }
+        println!("---");
+    }
+}
+
 fn main() {
     let args = Cli::from_args();
     let path = args.codebase;
 
-    find_elasticsearch_dsl_in_codebase(&path);
+    scan_codebase(&path);
 }
 
 fn is_rust_file(entry: &DirEntry) -> bool {
@@ -81,10 +133,11 @@ fn is_rust_file(entry: &DirEntry) -> bool {
 }
 
 fn is_not_target_dir(entry: &DirEntry) -> bool {
-    !entry.path().to_str().map(|s| s.contains("target")).unwrap_or(false)
+    !entry.path().to_str().map(|s| s.contains("target") || s.contains("node_modules")).unwrap_or(false)
 }
 
-fn find_elasticsearch_dsl_in_codebase(path: &PathBuf) {
+
+fn scan_codebase(path: &PathBuf) {
     for entry in WalkDir::new(path)
         .into_iter()
         .filter_map(Result::ok)
@@ -93,28 +146,28 @@ fn find_elasticsearch_dsl_in_codebase(path: &PathBuf) {
     {
         let content = std::fs::read_to_string(entry.path()).unwrap();
         match syn::parse_str(&content) {
-            Ok(ast) => {
-                // println!("{}", &entry.path().display());
-                let mut visitor = CodeVisitor{
-                    functions: Vec::new(),
-                };
-                visitor.visit_file(&ast);
-                if !visitor.functions.is_empty() {
-                    println!("File: {}", entry.path().display());
-                    for func_info in visitor.functions {
-                        println!("{}\n", func_info);
-                    }
-                    println!("---");
-                }
-            }
+            Ok(ast) => CodeVisitor::create_report(entry, &ast),
             Err(err) => {
                 eprintln!("{}: {err}", path.display());
             },
         }
-
-
     }
 }
+
+pub struct TypeInfo {
+    name: String,
+    kind: String,
+    visibility: Option<String>,
+}
+
+impl fmt::Display for TypeInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let default_private = "private".to_string();
+        let visibility = self.visibility.as_ref().unwrap_or(&default_private);
+        write!(f, "{} {} {}", visibility, self.kind, self.name)
+    }
+}
+
 pub struct FunctionInfo {
     name: String,
     is_async: bool,
@@ -132,7 +185,7 @@ impl fmt::Display for FunctionInfo {
 
         write!(
             f,
-            "{} {}function {}({}) -> {}",
+            "{} {}fn {}({}) -> {}",
             visibility, async_keyword, self.name, inputs, self.output
         )
     }
